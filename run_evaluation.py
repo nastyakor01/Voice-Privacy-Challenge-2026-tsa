@@ -14,6 +14,8 @@ parser = ArgumentParser()
 parser.add_argument('--config', default='config_eval.yaml')
 parser.add_argument('--overwrite', type=str, default='{}')
 parser.add_argument('--force_compute', type=str, default='False')
+parser.add_argument('--skip_dependency_check', action='store_true',
+                    help='Skip requirements.txt pin check (e.g. jupyter bumped IPython deps).')
 parser.add_argument('--gpu_ids', default='0')
 args = parser.parse_args()
 
@@ -97,7 +99,8 @@ def save_result_summary(out_path, results_dict, config):
 
 
 if __name__ == '__main__':
-    check_dependencies('requirements.txt')
+    if not args.skip_dependency_check:
+        check_dependencies('requirements.txt')
     multiprocessing.set_start_method("fork",force=True)
 
     params = parse_yaml(Path(args.config), overrides=json.loads(args.overwrite))

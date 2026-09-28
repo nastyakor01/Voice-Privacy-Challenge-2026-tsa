@@ -107,7 +107,9 @@ def read_matrix(filename):
 
 def save_kaldi_format(data, filename):
     if isinstance(data, list):
-        if len(data) == 2:
+        if not data:
+            data = {}
+        elif len(data) == 2:
             data = dict(zip(data[0], data[1]))
         elif isinstance(data[0], tuple) and len(data[0]) == 2:
             data = dict(data)

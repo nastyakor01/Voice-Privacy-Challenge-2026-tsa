@@ -16,8 +16,9 @@ logger = setup_logger(__name__)
 
 class ImsProsodyExtractor:
 
-    def __init__(self, aligner_path, device, on_line_fine_tune=True):
+    def __init__(self, aligner_path, device, on_line_fine_tune=True, trim_silence=True):
         self.on_line_fine_tune = on_line_fine_tune
+        self.trim_silence = trim_silence
 
         self.ap = AudioPreprocessor(input_sr=16000, output_sr=16000, cut_silence=False)
         self.tf = ArticulatoryCombinedTextFrontend(language="en", device=device)
@@ -26,16 +27,19 @@ class ImsProsodyExtractor:
         self.acoustic_model = Aligner()
         self.acoustic_model.load_state_dict(self.aligner_weights)
         self.acoustic_model = self.acoustic_model.to(self.device)
-        torch.hub._validate_not_a_forked_repo = lambda a, b, c: True  # torch 1.9 has a bug in the hub loading, this is a workaround
-        # careful: assumes 16kHz or 8kHz audio
-        self.silero_model, utils = torch.hub.load(repo_or_dir='snakers4/silero-vad',
-                                                  model='silero_vad',
-                                                  force_reload=False,
-                                                  onnx=False,
-                                                  verbose=False)
-        (self.get_speech_timestamps, _, _, _, _) = utils
-        torch.set_grad_enabled(True)  # finding this issue was very infuriating: silero sets
-        # this to false globally during model loading rather than using inference mode or no_grad
+        self.silero_model = None
+        self.get_speech_timestamps = None
+        if self.trim_silence:
+            torch.hub._validate_not_a_forked_repo = lambda a, b, c: True  # torch 1.9 has a bug in the hub loading, this is a workaround
+            # careful: assumes 16kHz or 8kHz audio
+            self.silero_model, utils = torch.hub.load(repo_or_dir='snakers4/silero-vad',
+                                                      model='silero_vad',
+                                                      force_reload=False,
+                                                      onnx=False,
+                                                      verbose=False)
+            (self.get_speech_timestamps, _, _, _, _) = utils
+            torch.set_grad_enabled(True)  # finding this issue was very infuriating: silero sets
+            # this to false globally during model loading rather than using inference mode or no_grad
         self.parsel = Parselmouth(reduction_factor=1, fs=16000)
         self.energy_calc = EnergyCalculator(reduction_factor=1, fs=16000)
         self.dc = DurationCalculator(reduction_factor=1)
@@ -64,13 +68,18 @@ class ImsProsodyExtractor:
             logger.error('Something went wrong, the reference wave might be too short.')
             raise RuntimeError
 
-        with torch.inference_mode():
-            speech_timestamps = self.get_speech_timestamps(norm_wave, self.silero_model, sampling_rate=16000)
-        if len(speech_timestamps) == 0:
-            speech_timestamps = [{'start': 0, 'end': len(norm_wave)}]
-        start_silence = speech_timestamps[0]['start']
-        end_silence = len(norm_wave) - speech_timestamps[-1]['end']
-        norm_wave = norm_wave[speech_timestamps[0]['start']:speech_timestamps[-1]['end']]
+        if self.trim_silence:
+            with torch.inference_mode():
+                speech_timestamps = self.get_speech_timestamps(norm_wave, self.silero_model, sampling_rate=16000)
+            if len(speech_timestamps) == 0:
+                speech_timestamps = [{'start': 0, 'end': len(norm_wave)}]
+            start_silence = speech_timestamps[0]['start']
+            end_silence = len(norm_wave) - speech_timestamps[-1]['end']
+            norm_wave = norm_wave[speech_timestamps[0]['start']:speech_timestamps[-1]['end']]
+        else:
+            # Turn crops are already cut to diarization windows; extra VAD can eat onsets.
+            start_silence = 0
+            end_silence = 0
 
         norm_wave_length = torch.LongTensor([len(norm_wave)])
         text = self.tf.string_to_tensor(transcript, handle_missing=True, input_phonemes=input_is_phones).squeeze(0)
@@ -119,6 +128,8 @@ class ImsProsodyExtractor:
                                   torch.LongTensor([0]),  # insert a 0 duration wherever there is a word boundary
                                   duration[index_of_word_boundary:]])
 
+        phones = self._phones_from_text_tensor(text)
+
         energy = self.energy_calc(input_waves=norm_wave.unsqueeze(0),
                                   input_waves_lengths=norm_wave_length,
                                   feats_lengths=feature_length,
@@ -133,4 +144,19 @@ class ImsProsodyExtractor:
                             durations=duration.unsqueeze(0),
                             durations_lengths=torch.LongTensor([len(duration)]))[0].squeeze(0).cpu()
 
-        return duration, pitch, energy, start_silence, end_silence
+        return duration, pitch, energy, start_silence, end_silence, phones
+
+    def _phones_from_text_tensor(self, text):
+        """Phone symbols aligned 1:1 with the duration tensor (space = word boundary)."""
+        phones = []
+        wb = get_feature_to_index_lookup()["word-boundary"]
+        for vector in text:
+            if int(vector[wb].item()) == 1:
+                phones.append(" ")
+                continue
+            ids = self.tf.text_vectors_to_id_sequence(text_vector=vector.unsqueeze(0))
+            if ids:
+                phones.append(self.tf.id_to_phone[int(ids[0])])
+            else:
+                phones.append("?")
+        return phones

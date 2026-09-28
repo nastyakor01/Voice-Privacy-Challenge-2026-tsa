@@ -85,8 +85,8 @@ class SpeechSynthesis:
                         else:
                             speaker_embedding = speaker_embeddings.get_embedding_for_identifier(utt)
 
-                        if prosody:
-                            utt_prosody_dict = prosody.get_instance(utt)
+                        if prosody and utt in prosody.utterances:
+                            utt_prosody_dict = prosody.get_instance(utt) # phone durations, pitch, energy, start_silence, end_silence
                         else:
                             utt_prosody_dict = {}
                         instances.append((text, utt, speaker_embedding, utt_prosody_dict, language))
@@ -112,7 +112,7 @@ class SpeechSynthesis:
                             else:
                                 speaker_embedding = speaker_embeddings.get_embedding_for_identifier(utt)
 
-                            if prosody:
+                            if prosody and utt in prosody.utterances:
                                 utt_prosody_dict = prosody.get_instance(utt)
                             else:
                                 utt_prosody_dict = {}

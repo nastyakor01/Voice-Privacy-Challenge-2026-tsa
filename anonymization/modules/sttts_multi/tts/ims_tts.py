@@ -18,6 +18,14 @@ class ImsTTS:
 
     def read_text(self, text, speaker_embedding, text_is_phones=True, language='en', duration=None, pitch=None,
                   energy=None, start_silence=None, end_silence=None):
+        # Temporarily: only gold pitch from aligner. Durations/energy predicted; no edge silence.
+        # Remix still pad/trims to the slot.
+        #duration = None
+        pitch = None
+        energy = None
+        start_silence = None
+        end_silence = None
+
         if pitch is not None:
             pitch = pitch.transpose(0, 1)
         if energy is not None:

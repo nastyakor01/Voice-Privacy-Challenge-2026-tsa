@@ -34,7 +34,8 @@ def asr_eval_whisper(eval_datasets, eval_data_dir, params, anon_data_suffix, dev
 
     model = InferenceWhisperASR( device=device)
     
-    results_dir = params['results_dir']
+    results_dir = Path(params['results_dir'])
+    results_dir.mkdir(parents=True, exist_ok=True)
     test_sets = eval_datasets + [f'{asr_dataset}{anon_data_suffix}' for asr_dataset in eval_datasets]
     results = []
 

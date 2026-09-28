@@ -1,0 +1,3 @@
+lhotse
+# DiCoW generate() from TS-ASR-Whisper; hub remote code is 4.42-only
+transformers==4.55.0

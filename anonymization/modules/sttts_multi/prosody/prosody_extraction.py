@@ -31,8 +31,10 @@ class ProsodyExtraction:
         if extractor_type == 'ims':
             self.aligner_path = settings.get('aligner_model_path')
             self.on_line_fine_tune = settings.get('on_line_fine_tune', True)
+            self.trim_silence = settings.get('trim_silence', True)
             self.extractor = ImsProsodyExtractor(aligner_path=self.aligner_path, device=self.device,
-                                                 on_line_fine_tune=self.on_line_fine_tune)
+                                                 on_line_fine_tune=self.on_line_fine_tune,
+                                                 trim_silence=self.trim_silence)
 
     def extract_prosody(self, dataset_path: Path, texts, dataset_name=None):
         dataset_name = dataset_name if dataset_name else dataset_path.name
@@ -56,12 +58,12 @@ class ProsodyExtraction:
                 try:
                     utt_prosody = self.extractor.extract_prosody(transcript=text, ref_audio_path=wav_path,
                                                                  input_is_phones=text_is_phones, lang=language)
-                except IndexError as e:
-                    logger.warn(f'IndexError for {utt}')
+                except (IndexError, KeyError, RuntimeError) as e:
+                    logger.warn(f'Prosody extraction failed for {utt}: {e}')
                     continue
-                duration, pitch, energy, start_silence, end_silence = utt_prosody
+                duration, pitch, energy, start_silence, end_silence, phones = utt_prosody
                 data_prosody.add_instance(utterance=utt, duration=duration, pitch=pitch, energy=energy,
-                                          start_silence=start_silence, end_silence=end_silence)
+                                          start_silence=start_silence, end_silence=end_silence, phones=phones)
                 i += 1
                 if self.save_intermediate and i > 0 and i % 100 == 0:
                     data_prosody.save_prosody(dataset_results_dir)

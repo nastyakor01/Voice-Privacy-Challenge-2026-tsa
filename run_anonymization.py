@@ -61,7 +61,7 @@ if __name__ == '__main__':
     config = parse_yaml(Path(args.config))
 
     # For isolated-venv pipelines: run install first (creates venv), then re-exec with that venv
-    if config['pipeline'] in ('sttts', 'sttts_multi'):
+    if config['pipeline'] in ('sttts', 'sttts_multi', 'sttts_multi_dicow'):
         install_script = 'anonymization/pipelines/sttts/install.sh' if config['pipeline'] == 'sttts' else 'anonymization/pipelines/sttts_multi/install.sh'
         shell_run(install_script)
         venv_name = 'venv_sttts' if config['pipeline'] == 'sttts' else 'venv_sttts_multi'
@@ -102,6 +102,21 @@ if __name__ == '__main__':
         os.environ['ESPEAK_DATA_PATH'] = str(venv_dir / 'share' / 'espeak-ng-data')
         os.environ['PHONEMIZER_ESPEAK_LIBRARY'] = str(venv_dir / 'lib' / 'libespeak-ng.so')
         from anonymization.pipelines.sttts_multi import STTTSMultiPipeline as pipeline
+    elif config['pipeline'] == "sttts_multi_dicow":
+        shell_run('anonymization/pipelines/sttts_multi/install.sh')
+        extra_req = Path(__file__).parent / 'anonymization/pipelines/sttts_multi_dicow/requirements.txt'
+        venv_python = Path(__file__).parent / 'venv_sttts_multi' / 'bin' / 'python'
+        if extra_req.exists():
+            pip_cmd = [str(venv_python), '-m', 'pip', 'install', '-r', str(extra_req)]
+            if subprocess.run(pip_cmd).returncode != 0:
+                logger.error('Failed to install sttts_multi_dicow extra requirements (lhotse, transformers 4.55)')
+                sys.exit(1)
+        if "download_precomputed_intermediate_repr" in config and config["download_precomputed_intermediate_repr"]:
+            shell_run('anonymization/pipelines/sttts_multi/download_precomputed_intermediate_repr.sh')
+        venv_dir = Path(__file__).parent / 'venv_sttts_multi'
+        os.environ['ESPEAK_DATA_PATH'] = str(venv_dir / 'share' / 'espeak-ng-data')
+        os.environ['PHONEMIZER_ESPEAK_LIBRARY'] = str(venv_dir / 'lib' / 'libespeak-ng.so')
+        from anonymization.pipelines.sttts_multi_dicow import STTTSMultiDiCoWPipeline as pipeline
     elif config['pipeline'] == "nac":
         shell_run('anonymization/pipelines/nac/install.sh')
         sys.path.append(os.path.join(os.path.dirname(__file__), 'anonymization/modules/nac/coqui_tts/'))

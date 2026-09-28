@@ -1,3 +1,4 @@
+import json
 import numpy as np
 import torch
 
@@ -13,6 +14,7 @@ class Prosody:
 
         self.start_silences = []
         self.end_silences = []
+        self.phones = []
 
         self.new = True
 
@@ -28,7 +30,7 @@ class Prosody:
             for i in range(len(self)):
                 yield self.idx2utt[i], self.durations[i], self.pitches[i], self.energies[i]
 
-    def add_instance(self, utterance, duration, pitch, energy, start_silence=None, end_silence=None):
+    def add_instance(self, utterance, duration, pitch, energy, start_silence=None, end_silence=None, phones=None):
         idx = len(self)
         self.utterances[utterance] = idx
         self.idx2utt[idx] = utterance
@@ -37,6 +39,7 @@ class Prosody:
         self.energies.append(energy)
         self.start_silences.append(start_silence)
         self.end_silences.append(end_silence)
+        self.phones.append(phones)
 
     def get_instance(self, utterance):
         idx = self.utterances[utterance]
@@ -52,13 +55,17 @@ class Prosody:
 
         return return_dict
 
-    def update_instance(self, utterance, duration, pitch, energy, start_silence=None, end_silence=None):
+    def update_instance(self, utterance, duration, pitch, energy, start_silence=None, end_silence=None, phones=None):
         idx = self.utterances[utterance]
         self.durations[idx] = duration
         self.pitches[idx] = pitch
         self.energies[idx] = energy
         self.start_silences[idx] = start_silence
         self.end_silences[idx] = end_silence
+        if phones is not None or idx >= len(self.phones):
+            while len(self.phones) <= idx:
+                self.phones.append(None)
+            self.phones[idx] = phones
 
     def shuffle(self):
         shuffled_utterances = {}
@@ -67,6 +74,7 @@ class Prosody:
         shuffled_energies = []
         shuffled_start_silences = []
         shuffled_end_silences = []
+        shuffled_phones = []
 
         i = 0
         for idx in np.random.permutation(len(self)):
@@ -76,6 +84,7 @@ class Prosody:
             shuffled_energies.append(self.energies[idx])
             shuffled_start_silences.append(self.start_silences[idx])
             shuffled_end_silences.append(self.end_silences[idx])
+            shuffled_phones.append(self.phones[idx] if idx < len(self.phones) else None)
             i += 1
 
         self.utterances = shuffled_utterances
@@ -84,6 +93,7 @@ class Prosody:
         self.energies = shuffled_energies
         self.start_silences = shuffled_start_silences
         self.end_silences = shuffled_end_silences
+        self.phones = shuffled_phones
         self.idx2utt = {idx: utt for utt, idx in self.utterances.items()}
 
     def save_prosody(self, out_dir):
@@ -94,10 +104,27 @@ class Prosody:
         torch.save(self.energies, out_dir / 'energy.pt')
         torch.save(self.start_silences, out_dir / 'start_silence.pt')
         torch.save(self.end_silences, out_dir / 'end_silence.pt')
+        torch.save(self.phones, out_dir / 'phones.pt')
 
         with open(out_dir / 'utterances', 'w') as f:
             for utt, _ in sorted(self.utterances.items(), key=lambda x: x[1]):
                 f.write(f'{utt}\n')
+
+        hop_ms = 256 / 16000 * 1000.0
+        with open(out_dir / 'alignments.jsonl', 'w', encoding='utf-8') as f:
+            for i in range(len(self)):
+                utt = self.idx2utt[i]
+                dur = self.durations[i]
+                dur_list = dur.tolist() if hasattr(dur, "tolist") else list(dur)
+                phones = self.phones[i] if i < len(self.phones) and self.phones[i] is not None else []
+                f.write(json.dumps({
+                    "utt": utt,
+                    "phones": phones,
+                    "durations_frames": dur_list,
+                    "durations_ms": [round(d * hop_ms, 2) for d in dur_list],
+                    "start_silence_samples": int(self.start_silences[i] or 0),
+                    "end_silence_samples": int(self.end_silences[i] or 0),
+                }, ensure_ascii=False) + "\n")
 
     def load_prosody(self, in_dir):
         self.new = False
@@ -107,6 +134,11 @@ class Prosody:
         self.energies = torch.load(in_dir / 'energy.pt', map_location='cpu')
         self.start_silences = torch.load(in_dir / 'start_silence.pt', map_location='cpu')
         self.end_silences = torch.load(in_dir / 'end_silence.pt', map_location='cpu')
+        phones_path = in_dir / 'phones.pt'
+        if phones_path.exists():
+            self.phones = torch.load(phones_path, map_location='cpu')
+        else:
+            self.phones = [None] * len(self.durations)
 
         self.utterances = {}
         i = 0
