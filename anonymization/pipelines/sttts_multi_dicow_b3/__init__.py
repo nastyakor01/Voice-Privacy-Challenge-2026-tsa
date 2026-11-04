@@ -1,0 +1,1 @@
+from .sttts_multi_dicow_b3_pipeline import STTTSMultiDiCoWB3Pipeline

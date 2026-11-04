@@ -11,12 +11,16 @@ from .dicow_model import DiCoWForConditionalGeneration
 from ..text import Text
 from ...dialogue.lhotse_io import (
     build_stno_mask,
+    build_all_target_stno_mask,
     cut_has_speaker,
     cut_speakers,
     cut_anonymize_speaker,
     hyp_to_target_turn_segments,
+    hyp_to_concat_segment,
+    hyp_to_span_segment,
     load_cut_audio,
     target_supervision_windows,
+    cut_audio_window,
 )
 from utils import setup_logger
 
@@ -55,6 +59,9 @@ class DiCoWASR:
         decoding_ctc_weight=0.0,
         num_beams=1,
         return_timestamps=True,
+        segment_layout="turns",
+        decode_anonymize_only=False,
+        stno_layout="supervisions",
         **kwargs,
     ):
         self.device = device
@@ -66,6 +73,9 @@ class DiCoWASR:
         self.utt_start_token = utt_start_token
         self.utt_end_token = utt_end_token
         self.return_timestamps = return_timestamps
+        self.segment_layout = str(segment_layout or "turns")
+        self.decode_anonymize_only = bool(decode_anonymize_only)
+        self.stno_layout = str(stno_layout or "supervisions")
         self.num_beams = num_beams
         self.output = "text"
 
@@ -127,14 +137,17 @@ class DiCoWASR:
         base = self._prepare_features(cut)
         items = []
         for spk in speakers:
-            if not cut_has_speaker(cut, spk):
-                continue
-            stno = build_stno_mask(
-                cut,
-                speaker_id=spk,
-                n_enc_frames=base["n_enc_frames"],
-                n_samples_padded=base["n_samples_padded"],
-            )
+            if self.stno_layout == "all_target":
+                stno = build_all_target_stno_mask(base["n_enc_frames"])
+            else:
+                if not cut_has_speaker(cut, spk):
+                    continue
+                stno = build_stno_mask(
+                    cut,
+                    speaker_id=spk,
+                    n_enc_frames=base["n_enc_frames"],
+                    n_samples_padded=base["n_samples_padded"],
+                )
             items.append({
                 "cut": cut,
                 "speaker": str(spk),
@@ -190,7 +203,15 @@ class DiCoWASR:
     def _segments_from_hyp(self, cut, hyp_text, speaker_id=None):
         speaker_id = str(speaker_id or self.target_speaker_id)
         windows = target_supervision_windows(cut, speaker_id)
-        parsed = hyp_to_target_turn_segments(hyp_text, windows)
+        if self.segment_layout == "full":
+            window = cut_audio_window(cut)
+            parsed = hyp_to_span_segment(hyp_text, [window] if window else [])
+        elif self.segment_layout == "span":
+            parsed = hyp_to_span_segment(hyp_text, windows)
+        elif self.segment_layout == "concat":
+            parsed = hyp_to_concat_segment(hyp_text, windows)
+        else:
+            parsed = hyp_to_target_turn_segments(hyp_text, windows)
         segments = []
         for i, item in enumerate(parsed):
             sentence = self.utt_start_token + item["text"].strip() + self.utt_end_token
@@ -225,7 +246,11 @@ class DiCoWASR:
 
         short_items, long_items = [], []
         for cut in cuts:
-            items = self._items_for_cut(cut, cut_speakers(cut))
+            speakers = cut_speakers(cut)
+            if self.decode_anonymize_only:
+                target = cut_anonymize_speaker(cut, default=self.target_speaker_id)
+                speakers = [target] if target is not None else []
+            items = self._items_for_cut(cut, speakers)
             dest = short_items if cut.duration <= 30.0 else long_items
             dest.extend(items)
 

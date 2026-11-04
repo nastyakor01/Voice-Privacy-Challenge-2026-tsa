@@ -1,0 +1,106 @@
+data_dir: data
+results_dir: data
+
+pipeline: sttts_multi_dicow_b3
+anon_suffix: _sttts_dicow_b3_monocut
+
+datasets:
+  - name: librimix_enrolls
+    data: librimix_enrolls
+    lhotse_cutset: /vol/das-nobackup/users/akorenevskaia/projects/diar-anon/TS-ASR-Whisper/data/manifests_mono/librimix_enrolls.jsonl.gz
+
+  - name: sparse_2_0_mix_clean
+    data: sparse_2_0_mix_clean
+    lhotse_cutset: /vol/das-nobackup/users/akorenevskaia/projects/diar-anon/TS-ASR-Whisper/data/manifests_mono/sparse_2_0_mix_clean.jsonl.gz
+
+  - name: sparse_2_0.2_mix_clean
+    data: sparse_2_0.2_mix_clean
+    lhotse_cutset: /vol/das-nobackup/users/akorenevskaia/projects/diar-anon/TS-ASR-Whisper/data/manifests_mono/sparse_2_0.2_mix_clean.jsonl.gz
+
+  - name: sparse_2_0.4_mix_clean
+    data: sparse_2_0.4_mix_clean
+    lhotse_cutset: /vol/das-nobackup/users/akorenevskaia/projects/diar-anon/TS-ASR-Whisper/data/manifests_mono/sparse_2_0.4_mix_clean.jsonl.gz
+
+  - name: sparse_2_0.6_mix_clean
+    data: sparse_2_0.6_mix_clean
+    lhotse_cutset: /vol/das-nobackup/users/akorenevskaia/projects/diar-anon/TS-ASR-Whisper/data/manifests_mono/sparse_2_0.6_mix_clean.jsonl.gz
+
+  - name: sparse_2_0.8_mix_clean
+    data: sparse_2_0.8_mix_clean
+    lhotse_cutset: /vol/das-nobackup/users/akorenevskaia/projects/diar-anon/TS-ASR-Whisper/data/manifests_mono/sparse_2_0.8_mix_clean.jsonl.gz
+
+  - name: sparse_2_1_mix_clean
+    data: sparse_2_1_mix_clean
+    lhotse_cutset: /vol/das-nobackup/users/akorenevskaia/projects/diar-anon/TS-ASR-Whisper/data/manifests_mono/sparse_2_1_mix_clean.jsonl.gz
+
+models_dir: exp/sttts_multi_models
+save_intermediate: true
+intermediate_dir: !ref exp/anon_pipeline_<pipeline>_monocut
+download_precomputed_intermediate_repr: false
+
+modules:
+  asr:
+    recognizer: dicow
+    model_name: BUT-FIT/DiCoW_v3_2
+    model_path: !ref <models_dir>/dicow_v3_2
+    target_speaker_id: "0"
+    language: en
+    batch_size: 4
+    num_beams: 1
+    decoding_ctc_weight: 0.0
+    return_timestamps: false
+    segment_layout: full
+    decode_anonymize_only: true
+    stno_layout: all_target
+    force_compute_recognition: true
+    utt_start_token: ""
+    utt_end_token: ""
+    results_path: !ref <intermediate_dir>/transcription/dicow_s1
+
+  speaker_embeddings:
+    anonymizer: ims
+    force_compute_extraction: true
+    force_compute_anonymization: true
+    use_tse_support_enrolls: false
+    tse_support_enrolls: data/tse_enrolls
+    vec_type: ecapa
+    emb_model_path: !ref <models_dir>/spkrec-ecapa-voxceleb
+    anon_settings:
+      method: gan
+      vectors_file: !ref <models_dir>/embedding_gan_generated_vectors.pt
+      gan_model_path: !ref <models_dir>/embedding_gan.pt
+      num_sampled: 50000
+      sim_threshold: 0.7
+    extraction_results_path: exp/anon_pipeline_sttts_multi_dicow_b3_monocut/original_speaker_embeddings/ecapa
+    anon_results_path: exp/anon_pipeline_sttts_multi_dicow_b3_monocut/anon_speaker_embeddings/ecapa
+    anon_level_spk: [
+                     librimix_enrolls,
+                     ]
+    anon_level_utt: [
+                     sparse_2_0_mix_clean,
+                     sparse_2_0.2_mix_clean,
+                     sparse_2_0.4_mix_clean,
+                     sparse_2_0.6_mix_clean,
+                     sparse_2_0.8_mix_clean,
+                     sparse_2_1_mix_clean,
+                     ]
+
+  prosody:
+    extractor_type: ims
+    force_compute_extraction: true
+    trim_silence: true
+    aligner_model_path: !ref <models_dir>/aligner.pt
+    extraction_results_path: !ref <intermediate_dir>/original_prosody/ims_extractor_s1
+    tse: false
+    # tse_dir: exp/anon_pipeline_sttts_multi_dicow/tse
+    # tse_s1_subdir: s1
+    # tse_residual_subdir: s1_project
+
+  tts:
+    synthesizer: ims
+    fastspeech_path: !ref <models_dir>/ToucanTTS_Meta.pt
+    hifigan_path: !ref <models_dir>/Vocoder.pt
+    embeddings_path: !ref <models_dir>/spkrec-ecapa-voxceleb
+    output_sr: 16000
+    force_compute_synthesis: true
+    results_path: !ref <intermediate_dir>/anon_speech/ims_sttts_multi_dicow_b3_monocut

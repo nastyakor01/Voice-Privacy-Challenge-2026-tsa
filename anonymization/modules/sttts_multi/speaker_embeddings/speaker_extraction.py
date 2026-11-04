@@ -14,6 +14,9 @@ from .utils import normalize_wave
 from .speaker_embeddings import SpeakerEmbeddings
 from utils import read_kaldi_format, remove_contents_in_dir, setup_logger
 
+# Keep in sync with dialogue.lhotse_io.MIN_ECAPA_EMBED_SEC (avoid importing lhotse here).
+MIN_ECAPA_EMBED_SEC = 0.5
+
 set_start_method('spawn', force=True)
 logger = setup_logger(__name__)
 
@@ -41,14 +44,25 @@ def extraction_job(params):
             signal, fs = torchaudio.load(wav_path)
         # if len(signal.shape) == 2:
         #     signal = signal.squeeze(0)
+        n_samples = int(signal.shape[-1])
+        dur_sec = float(n_samples) / float(fs) if fs else 0.0
+        if dur_sec < MIN_ECAPA_EMBED_SEC:
+            logger.warning(
+                f'Skip short ECAPA audio: {utt}, {signal.shape}, {dur_sec:.3f}s '
+                f'< {MIN_ECAPA_EMBED_SEC}s; TTS omitted, remix keeps original'
+            )
+            continue
         norm_wave = normalize_wave(signal, fs, device=device)
 
         try:
             with torch.no_grad():
                 spk_embs = [extractor.extract_vector(audio=norm_wave, sr=fs,wav_path=wav_path) for extractor in speaker_extractors]
         except RuntimeError as e:
-            logger.warning(f'Runtime error: {utt}, {signal.shape}, {norm_wave.shape}')
-            raise e
+            logger.warning(
+                f'Skip ECAPA RuntimeError: {utt}, {signal.shape}, {norm_wave.shape}: {e}; '
+                'TTS omitted, remix keeps original'
+            )
+            continue
             
         if len(spk_embs) == 1:
             vector = spk_embs[0]

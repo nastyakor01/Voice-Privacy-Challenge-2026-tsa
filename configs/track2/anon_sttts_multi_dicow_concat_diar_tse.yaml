@@ -1,0 +1,103 @@
+data_dir: data
+results_dir: data
+
+pipeline: sttts_multi_dicow_concat
+anon_suffix: _sttts_dicow_concat_diar_tse
+
+datasets:
+  - name: librimix_enrolls
+    data: librimix_enrolls
+    lhotse_cutset: /vol/das-nobackup/users/akorenevskaia/projects/diar-anon/TS-ASR-Whisper/data/manifests_mono/librimix_enrolls.jsonl.gz
+
+  - name: sparse_2_0_mix_clean
+    data: sparse_2_0_mix_clean
+    lhotse_cutset: /vol/das-nobackup/users/akorenevskaia/projects/diar-anon/TS-ASR-Whisper/data/manifests_diarizen/ahc/sparselibrimix/sparse_2_0_mix_clean.jsonl.gz
+
+  - name: sparse_2_0.2_mix_clean
+    data: sparse_2_0.2_mix_clean
+    lhotse_cutset: /vol/das-nobackup/users/akorenevskaia/projects/diar-anon/TS-ASR-Whisper/data/manifests_diarizen/ahc/sparselibrimix/sparse_2_0.2_mix_clean.jsonl.gz
+
+  - name: sparse_2_0.4_mix_clean
+    data: sparse_2_0.4_mix_clean
+    lhotse_cutset: /vol/das-nobackup/users/akorenevskaia/projects/diar-anon/TS-ASR-Whisper/data/manifests_diarizen/ahc/sparselibrimix/sparse_2_0.4_mix_clean.jsonl.gz
+
+  - name: sparse_2_0.6_mix_clean
+    data: sparse_2_0.6_mix_clean
+    lhotse_cutset: /vol/das-nobackup/users/akorenevskaia/projects/diar-anon/TS-ASR-Whisper/data/manifests_diarizen/ahc/sparselibrimix/sparse_2_0.6_mix_clean.jsonl.gz
+
+  - name: sparse_2_0.8_mix_clean
+    data: sparse_2_0.8_mix_clean
+    lhotse_cutset: /vol/das-nobackup/users/akorenevskaia/projects/diar-anon/TS-ASR-Whisper/data/manifests_diarizen/ahc/sparselibrimix/sparse_2_0.8_mix_clean.jsonl.gz
+
+  - name: sparse_2_1_mix_clean
+    data: sparse_2_1_mix_clean
+    lhotse_cutset: /vol/das-nobackup/users/akorenevskaia/projects/diar-anon/TS-ASR-Whisper/data/manifests_diarizen/ahc/sparselibrimix/sparse_2_1_mix_clean.jsonl.gz
+
+models_dir: exp/sttts_multi_models
+save_intermediate: true
+intermediate_dir: !ref exp/anon_pipeline<anon_suffix>
+download_precomputed_intermediate_repr: false
+
+modules:
+  asr:
+    recognizer: dicow
+    model_name: BUT-FIT/DiCoW_v3_2
+    model_path: !ref <models_dir>/dicow_v3_2
+    target_speaker_id: "0"
+    language: en
+    batch_size: 4
+    num_beams: 1
+    decoding_ctc_weight: 0.0
+    return_timestamps: false
+    segment_layout: concat
+    force_compute_recognition: true
+    utt_start_token: ""
+    utt_end_token: ""
+    results_path: !ref <intermediate_dir>/transcription/dicow_concat
+
+  speaker_embeddings:
+    anonymizer: ims
+    force_compute_extraction: true
+    force_compute_anonymization: true
+    tse_support_enrolls: data/tse_enrolls
+    vec_type: ecapa
+    emb_model_path: !ref <models_dir>/spkrec-ecapa-voxceleb
+    anon_settings:
+      method: gan
+      vectors_file: !ref <models_dir>/embedding_gan_generated_vectors.pt
+      gan_model_path: !ref <models_dir>/embedding_gan.pt
+      num_sampled: 50000
+      sim_threshold: 0.7
+    # Shared ECAPA cache with sttts_multi_dicow; re-extract after TSE-enroll embedding change.
+    extraction_results_path: !ref exp/anon_pipeline<anon_suffix>/original_speaker_embeddings/ecapa
+    anon_results_path: !ref exp/anon_pipeline<anon_suffix>/anon_speaker_embeddings/ecapa
+    anon_level_spk: []
+    anon_level_utt: [
+                     librimix_enrolls,
+                     sparse_2_0_mix_clean,
+                     sparse_2_0.2_mix_clean,
+                     sparse_2_0.4_mix_clean,
+                     sparse_2_0.6_mix_clean,
+                     sparse_2_0.8_mix_clean,
+                     sparse_2_1_mix_clean,
+                     ]
+
+  prosody:
+    extractor_type: ims
+    force_compute_extraction: true
+    trim_silence: false
+    aligner_model_path: !ref <models_dir>/aligner.pt
+    extraction_results_path: !ref <intermediate_dir>/original_prosody/ims_extractor_concat
+    tse: true
+    tse_dir: exp/anon_pipeline_sttts_multi_dicow/tse
+    tse_s1_subdir: s1
+    tse_residual_subdir: s1_project
+
+  tts:
+    synthesizer: ims
+    fastspeech_path: !ref <models_dir>/ToucanTTS_Meta.pt
+    hifigan_path: !ref <models_dir>/Vocoder.pt
+    embeddings_path: !ref <models_dir>/spkrec-ecapa-voxceleb
+    output_sr: 16000
+    force_compute_synthesis: true
+    results_path: !ref <intermediate_dir>/anon_speech/ims_sttts_multi_dicow_concat

@@ -254,7 +254,8 @@ class ToucanTTS(torch.nn.Module):
                                                                              c=utterance_embedding)), min=0.0).long().squeeze(1) if gold_durations is None else gold_durations.squeeze(1)
 
         # modifying the predictions with control parameters
-        predicted_durations[0][0] = 1 # if the initial pause is too long, we get artifacts. This is once more a dirty hack.
+        if gold_durations is None:
+            predicted_durations[0][0] = 1 # if the initial pause is too long, we get artifacts. This is once more a dirty hack.
         for phoneme_index, phoneme_vector in enumerate(text_tensors.squeeze(0)):
             if phoneme_vector[get_feature_to_index_lookup()["word-boundary"]] == 1:
                 predicted_durations[0][phoneme_index] = 0

@@ -19,8 +19,10 @@ from ...modules.sttts_multi.dialogue.lhotse_io import (
     load_cutset,
     write_mix_kaldi_dir,
     write_speaker_segment_kaldi_dir,
+    write_tse_enroll_embedding_kaldi_dir,
     write_turn_kaldi_dir,
     mix_speaker_embedding_utt,
+    MIN_ECAPA_EMBED_SEC,
     load_cut_audio,
     remix_dialogue,
     cut_speakers,
@@ -28,6 +30,9 @@ from ...modules.sttts_multi.dialogue.lhotse_io import (
     cut_speaker_windows,
     resolve_tse_dataset_dir,
     build_tse_turn_audio_loader,
+    load_mix_enroll_scp,
+    _TSE_S1_ALIASES,
+    _resolve_tse_subdir,
 )
 import typing
 
@@ -58,6 +63,7 @@ class STTTSMultiDiCoWPipeline(Pipeline):
         save_intermediate = config.get("save_intermediate", True)
         self.save_intermediate = save_intermediate
         self.force_compute = force_compute
+        self._embed_cutset = None
 
         modules_config = config["modules"]
         self.modules_config = modules_config
@@ -143,7 +149,10 @@ class STTTSMultiDiCoWPipeline(Pipeline):
             target = cut_anonymize_speaker(cut, default=self.target_speaker_id)
             if target is None:
                 continue
-            need = set(cut_speakers(cut))
+            if getattr(self.dicow, "decode_anonymize_only", False):
+                need = {target}
+            else:
+                need = set(cut_speakers(cut))
             if decoded is None:
                 return False
             if not need.issubset(decoded.get(str(cut.id), set())):
@@ -205,11 +214,15 @@ class STTTSMultiDiCoWPipeline(Pipeline):
     def _prepare_tts_embeddings(self, utt_embeddings, segments, dataset_name, anon_level, cut_targets: dict):
         """GAN-anonymize only the per-cut target speaker; keep original embeddings for others.
 
-        One ECAPA per (mix, speaker) on concatenated exclusive speech, or on all
-        turns if exclusive speech in the mix is shorter than 2s. Target: that
-        vector through GAN once, reused on every target turn. Non-target: same
-        mix-level vector, no GAN. ``cut_targets`` maps cut.id -> speaker id from
-        ``cut.custom['anonymize']``.
+        One ECAPA per (mix, speaker): target from TSE support enroll if
+        ``enroll.scp`` has it, else exclusive speech (or all turns if exclusive
+        < 2s). Non-target: exclusive/turns, no GAN. ``cut_targets`` maps cut.id
+        -> speaker id from ``cut.custom['anonymize']``.
+
+        ``anon_level == "utt"`` (mixes): one GAN voice per cut, cache
+        ``{dataset}_target_mix``. ``anon_level == "spk"`` (enrolls): average
+        target ECAPAs per original speaker, one GAN voice, reused on every
+        cut of that speaker; cache ``{dataset}_target_spk``.
         """
         groups = defaultdict(list)  # (cut_id, speaker) -> [asr utt, ...]
         for seg in segments:
@@ -231,12 +244,21 @@ class STTTSMultiDiCoWPipeline(Pipeline):
 
         target_groups = {}
         other_groups = {}
+        skipped_mix = []
         for (cut_id, speaker), uids in groups.items():
+            if _mix_meta(cut_id, speaker) is None:
+                skipped_mix.append(f"{cut_id}/spk{speaker}")
             target = cut_targets.get(cut_id)
             if target is not None and speaker == target:
                 target_groups[cut_id] = uids
             else:
                 other_groups[(cut_id, speaker)] = uids
+        if skipped_mix:
+            logger.warning(
+                f"No ECAPA for {len(skipped_mix)} (mix, speaker) pairs; "
+                f"TTS skipped, remix keeps original: {skipped_mix[:12]}"
+                + ("..." if len(skipped_mix) > 12 else "")
+            )
 
         # TTS looks up embeddings at ASR utt-level, so broadcast the mix vector.
         vec_by_utt = {}
@@ -260,19 +282,35 @@ class STTTSMultiDiCoWPipeline(Pipeline):
                 )
                 mix_embs.set_vectors(mix_ids, torch.stack(mix_vecs, dim=0), mix_spks, mix_genders)
 
+                spk_level = str(anon_level) == "spk"
+                if spk_level:
+                    to_anon = mix_embs.convert_to_spk_level(method="average")
+                    cache_name = f"{dataset_name}_target_spk"
+                    logger.info(
+                        f"Speaker-level GAN: averaged {len(mix_ids)} target ECAPAs "
+                        f"into {len(to_anon)} speakers"
+                    )
+                else:
+                    to_anon = mix_embs
+                    cache_name = f"{dataset_name}_target_mix"
+
                 anon_key = anon_level if anon_level in self.speaker_anonymization else "utt"
                 if self.speaker_anonymization and anon_key in self.speaker_anonymization:
                     start_time = time.time()
                     anon_mix = self.speaker_anonymization[anon_key].anonymize_embeddings(
-                        speaker_embeddings=mix_embs, dataset_name=f"{dataset_name}_target_mix"
+                        speaker_embeddings=to_anon, dataset_name=cache_name
                     )
-                    logger.info("--- Speaker anonymization (one GAN voice per mix) time: "
-                                f"{(float(time.time() - start_time) / 60)} min ---")
+                    kind = "speaker" if spk_level else "mix"
+                    logger.info(
+                        f"--- Speaker anonymization (one GAN voice per {kind}) time: "
+                        f"{(float(time.time() - start_time) / 60)} min ---"
+                    )
                 else:
-                    anon_mix = mix_embs
+                    anon_mix = to_anon
 
                 for cut_id, (uids, spk, gender) in ready.items():
-                    anon_vec = anon_mix.get_embedding_for_identifier(cut_id)
+                    anon_id = spk if spk_level else cut_id
+                    anon_vec = anon_mix.get_embedding_for_identifier(anon_id)
                     for uid in uids:
                         vec_by_utt[uid] = anon_vec
                         meta_by_utt[uid] = (spk, gender)
@@ -302,6 +340,28 @@ class STTTSMultiDiCoWPipeline(Pipeline):
             merged.set_vectors(identifiers, torch.stack(vectors, dim=0), speakers, genders)
         return merged
 
+    def _drop_target_pitch_energy(self, prosody, segments, cut_targets: dict):
+        """Keep gold pitch/energy for non-target TTS; target uses predicted curves."""
+        n = 0
+        for seg in segments:
+            utt = seg.get("utt")
+            if not utt or utt not in prosody.utterances:
+                continue
+            if str(seg.get("speaker")) != str(cut_targets.get(str(seg.get("cut_id")))):
+                continue
+            inst = prosody.get_instance(utt)
+            prosody.update_instance(
+                utt,
+                duration=inst["duration"],
+                pitch=None,
+                energy=None,
+                start_silence=inst.get("start_silence"),
+                end_silence=inst.get("end_silence"),
+            )
+            n += 1
+        logger.info(f"Dropped gold pitch/energy for {n} target-speaker turns (non-target keep aligner curves)")
+        return prosody
+
     def run_anonymization_pipeline(self, datasets: typing.Dict[str, Path]):
         anon_wav_scps = {}
 
@@ -315,6 +375,7 @@ class STTTSMultiDiCoWPipeline(Pipeline):
 
             mix_kaldi_dir = Path(dataset_path)
             write_mix_kaldi_dir(cutset, mix_kaldi_dir)
+            cutset = self._prepare_cutset(cutset, dataset_name)
 
             start_time = time.time()
             texts, segments = self._load_or_run_asr(cutset, dataset_name)
@@ -323,11 +384,8 @@ class STTTSMultiDiCoWPipeline(Pipeline):
             speaker_kaldi_dir = self.intermediate_dir / "all_speaker_kaldi" / dataset_name
             speaker_wav_dir = speaker_kaldi_dir / "wav"
             if segments:
-                write_speaker_segment_kaldi_dir(
-                    cutset=cutset,
-                    segments=segments,
-                    out_dir=speaker_kaldi_dir,
-                    wav_dir=speaker_wav_dir,
+                self._write_embedding_kaldi(
+                    cutset, segments, dataset_name, speaker_kaldi_dir, speaker_wav_dir
                 )
             else:
                 logger.warning("No DiCoW segments; original mixtures will be copied.")
@@ -414,7 +472,21 @@ class STTTSMultiDiCoWPipeline(Pipeline):
             else:
                 anon_prosody = prosody
 
+            if anon_prosody is not None:
+                anon_prosody = self._drop_target_pitch_energy(anon_prosody, segments, cut_targets)
+
             tts_wav_scp = {}
+            if anon_embeddings is not None and texts:
+                missing_tts = [
+                    utt for utt in list(texts.utterances)
+                    if utt not in anon_embeddings.identifiers2idx
+                ]
+                if missing_tts:
+                    logger.warning(
+                        f"Skip TTS for {len(missing_tts)} turns without ECAPA "
+                        f"(short exclusive/turns); remix keeps original"
+                    )
+                    texts.remove_instances(missing_tts)
             if segments and anon_embeddings is not None and len(texts) > 0:
                 start_time = time.time()
                 tts_wav_scp = self.speech_synthesis.synthesize_speech(
@@ -427,8 +499,7 @@ class STTTSMultiDiCoWPipeline(Pipeline):
                 logger.info("--- Synthesis time: %f min ---" % (float(time.time() - start_time) / 60))
 
             start_time = time.time()
-            remix_tag = "remix_tse" if (self.modules_config.get("prosody") or {}).get("tse") else "remix"
-            remixed_dir = self.modules_config["tts"]["results_path"] / f"{dataset_name}_{remix_tag}"
+            remixed_dir = self.modules_config["tts"]["results_path"] / f"{dataset_name}_{self._remix_tag()}"
             remixed_dir.mkdir(parents=True, exist_ok=True)
             mix_wav_scp = self._remix_dataset(cutset, segments, tts_wav_scp, remixed_dir)
             logger.info("--- Remix time: %f min ---" % (float(time.time() - start_time) / 60))
@@ -436,11 +507,104 @@ class STTTSMultiDiCoWPipeline(Pipeline):
             output_path = Path(str(mix_kaldi_dir) + self.anon_suffix)
             copy_data_dir(mix_kaldi_dir, output_path)
             save_kaldi_format(mix_wav_scp, output_path / "wav.scp")
+            self._write_preserved_diarization(cutset, remixed_dir, output_path)
             anon_wav_scps[dataset_name] = mix_wav_scp
             logger.info(f"Wrote remixed mixtures to {output_path}")
 
         logger.info("--- Total computation time: %f min ---" % (float(time.time() - self.total_start_time) / 60))
         return anon_wav_scps
+
+    def _prepare_cutset(self, cutset, dataset_name: str):
+        return cutset
+
+    def _embed_full_cut(self) -> bool:
+        return False
+
+    def _use_tse_support_enrolls(self) -> bool:
+        """If false, skip TSE enroll wavs and crop ECAPA from exclusive/turns (or full cut)."""
+        spk_cfg = self.modules_config.get("speaker_embeddings") or {}
+        pro_cfg = self.modules_config.get("prosody") or {}
+        return bool(spk_cfg.get("use_tse_support_enrolls", pro_cfg.get("use_tse_support_enrolls", True)))
+
+    def _tse_support_enrolls_dir(self):
+        if not self._use_tse_support_enrolls():
+            return None
+        spk_cfg = self.modules_config.get("speaker_embeddings") or {}
+        pro_cfg = self.modules_config.get("prosody") or {}
+        raw = (
+            spk_cfg.get("tse_support_enrolls")
+            or pro_cfg.get("tse_support_enrolls")
+            or spk_cfg.get("tse_enrolls")
+            or pro_cfg.get("tse_enrolls")
+            or "data/tse_enrolls"
+        )
+        path = Path(raw)
+        return path if path.exists() else None
+
+    def _tse_root(self) -> Path:
+        prosody_cfg = self.modules_config.get("prosody") or {}
+        return Path(prosody_cfg.get("tse_dir") or (self.intermediate_dir / "tse"))
+
+    def _mix_to_tse_enroll(self, dataset_name: str) -> dict:
+        tse_ds = resolve_tse_dataset_dir(self._tse_root(), dataset_name)
+        if tse_ds is None:
+            return {}
+        s1_dir = _resolve_tse_subdir(
+            tse_ds,
+            str((self.modules_config.get("prosody") or {}).get("tse_s1_subdir", "s1")),
+            _TSE_S1_ALIASES,
+        )
+        if s1_dir is None:
+            return {}
+        return load_mix_enroll_scp(s1_dir)
+
+    def _write_embedding_kaldi(self, cutset, segments, dataset_name, speaker_kaldi_dir, speaker_wav_dir):
+        support = self._tse_support_enrolls_dir()
+        embed_cutset = self._embed_cutset if self._embed_cutset is not None else cutset
+        min_embed_sec = float(
+            (self.modules_config.get("speaker_embeddings") or {}).get(
+                "min_embed_sec", MIN_ECAPA_EMBED_SEC
+            )
+        )
+        if support is None:
+            full_cut = self._embed_full_cut()
+            source = "full_cut" if full_cut else "exclusive/turns"
+            if not self._use_tse_support_enrolls():
+                logger.info(f"use_tse_support_enrolls=false; ECAPA from {source}")
+            write_speaker_segment_kaldi_dir(
+                cutset=embed_cutset,
+                segments=segments,
+                out_dir=speaker_kaldi_dir,
+                wav_dir=speaker_wav_dir,
+                full_cut=full_cut,
+                min_embed_sec=min_embed_sec,
+            )
+            return
+        mix_to_enroll = self._mix_to_tse_enroll(dataset_name)
+        logger.info(
+            f"ECAPA from tse_support_enrolls={support} "
+            f"({len(mix_to_enroll)} enroll.scp maps for {dataset_name}; "
+            "target uses enroll if present, else exclusive/turns; non-target exclusive/turns)"
+        )
+        write_tse_enroll_embedding_kaldi_dir(
+            cutset=embed_cutset,
+            segments=segments,
+            out_dir=speaker_kaldi_dir,
+            wav_dir=speaker_wav_dir,
+            tse_support_enrolls_dir=support,
+            mix_to_enroll=mix_to_enroll,
+            min_embed_sec=min_embed_sec,
+        )
+
+    def _remix_tag(self) -> str:
+        return "remix_tse" if (self.modules_config.get("prosody") or {}).get("tse") else "remix"
+
+    def _write_preserved_diarization(self, cutset, remixed_dir: Path, output_path: Path):
+        return
+
+    def _overlap_residual_audio(self, cut, sr: int):
+        """Full-length companion for overlap remix. Concat supplies TSE residual."""
+        return None
 
     def _remix_dataset(self, cutset, segments, tts_wav_scp, remixed_dir: Path):
         segs_by_cut = {}
@@ -451,6 +615,7 @@ class STTTSMultiDiCoWPipeline(Pipeline):
         mix_wav_scp = {}
         fit_log_path = remixed_dir / "tts_slot_fit.jsonl"
         fit_records = []
+        n_orig_turns = 0
         for cut in cutset:
             orig_audio, sr = load_cut_audio(cut)
             out_path = remixed_dir / f"{cut.id}.wav"
@@ -459,6 +624,7 @@ class STTTSMultiDiCoWPipeline(Pipeline):
             for seg in cut_segs:
                 wav_ref = tts_wav_scp.get(seg["utt"])
                 if wav_ref is None:
+                    n_orig_turns += 1
                     continue
                 tts_audio, tts_sr = soundfile.read(wav_ref)
                 if tts_sr != sr and tts_audio.size:
@@ -482,6 +648,7 @@ class STTTSMultiDiCoWPipeline(Pipeline):
                     tts_segments,
                     speaker_windows=cut_speaker_windows(cut),
                     target_speaker_id=target,
+                    overlap_residual=self._overlap_residual_audio(cut, sr),
                 )
                 fit_records.extend(cut_fit)
             else:
@@ -491,5 +658,9 @@ class STTTSMultiDiCoWPipeline(Pipeline):
         with fit_log_path.open("w", encoding="utf-8") as f:
             for row in fit_records:
                 f.write(json.dumps(row) + "\n")
+        if n_orig_turns:
+            logger.info(
+                f"Remix kept original audio for {n_orig_turns} turns without TTS"
+            )
         logger.info(f"Wrote TTS vs slot lengths to {fit_log_path}")
         return mix_wav_scp

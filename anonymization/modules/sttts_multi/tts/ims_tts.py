@@ -18,13 +18,8 @@ class ImsTTS:
 
     def read_text(self, text, speaker_embedding, text_is_phones=True, language='en', duration=None, pitch=None,
                   energy=None, start_silence=None, end_silence=None):
-        # Temporarily: only gold pitch from aligner. Durations/energy predicted; no edge silence.
-        # Remix still pad/trims to the slot.
-        #duration = None
-        pitch = None
-        energy = None
-        start_silence = None
-        end_silence = None
+        # Gold pitch/energy: target drops them in DiCoW (GAN voice); non-target keeps aligner curves.
+        # start/end_silence: BM3-style zero pad after TTS when Silero trimmed the aligner crop.
 
         if pitch is not None:
             pitch = pitch.transpose(0, 1)
@@ -57,11 +52,13 @@ class ImsTTS:
         # start and end silence are computed for 16000, so we have to adapt this to different output sr
         factor = sr / 16000
         if start_silence is not None:
-            start_sil = np.zeros([int(start_silence * factor)])
-            wav = np.concatenate((start_sil, wav), axis=0)
+            n_start = int(float(start_silence) * factor)
+            if n_start > 0:
+                wav = np.concatenate((np.zeros(n_start, dtype=np.asarray(wav).dtype), np.asarray(wav)), axis=0)
         if end_silence is not None:
-            end_sil = np.zeros([int(end_silence * factor)])
-            wav = np.concatenate((wav, end_sil), axis=0)
+            n_end = int(float(end_silence) * factor)
+            if n_end > 0:
+                wav = np.concatenate((np.asarray(wav), np.zeros(n_end, dtype=np.asarray(wav).dtype)), axis=0)
 
         if self.output_sr != sr:
             wav = resampy.resample(wav, sr, self.output_sr)
